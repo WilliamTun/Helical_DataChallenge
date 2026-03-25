@@ -1,0 +1,23 @@
+{
+  "perturbation_types": [
+    "gene_knockout",
+    "gene_overexpression",
+    "gene_activation"
+  ],
+  "perturbations": [
+    {
+      "gene": "GENE0001",
+      "perturbation_type": "gene_knockout"
+    },
+    {
+      "perturbation_type": "gene_overexpression",
+      "gene": "GENE0003",
+      "fold_change": 2.5
+    },
+    {
+      "gene": "GENE0002",
+      "perturbation_type": "gene_activation",
+      "delta": 0.35
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "perturbation_types": [
+    "gene_knockout"
+  ],
+  "perturbations": [
+    {
+      "gene": "GENE0001",
+      "perturbation_type": "gene_knockout",
+      "target_donors": ["donor_03"],
+      "target_cell_types": ["T_cell"]
+    }
+  ]
+}
