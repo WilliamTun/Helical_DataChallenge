@@ -1,0 +1,11 @@
+{
+  "pipeline_output": {
+    "default_backend": "local_folder",
+    "steps": {
+      "generate_data": { "backend": null },
+      "preview_data": { "backend": null },
+      "run_perturbations": { "backend": null },
+      "compute_comparisons": { "backend": null }
+    }
+  }
+}

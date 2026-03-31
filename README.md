@@ -3,6 +3,11 @@
 This repository contains a mock pipeline to validate perturbation workflow logic on synthetic `AnnData`.
 All model and comparison outputs are intentionally mocked for pipeline prototyping.
 
+## Contributor Docs
+
+- Start with `lineage.md` for an end-to-end walkthrough of data transformations and lineage tracking in Dagster.
+- Use `instructions.md` for detailed run/configuration examples.
+
 ## Quickstart
 
 ```bash
@@ -10,18 +15,18 @@ All model and comparison outputs are intentionally mocked for pipeline prototypi
 source .venv/bin/activate
 
 # Generate synthetic healthy dataset
-uv run python src/generate_data.py --output outputs/synthetic_adata.h5ad
+uv run python src/pipeline/generate_data.py --output outputs/synthetic_adata.h5ad
 
 # Optional preview/QA
-uv run python src/preview_data.py --input outputs/synthetic_adata.h5ad
+uv run python src/pipeline/preview_data.py --input outputs/synthetic_adata.h5ad
 
 # Run perturbation experiments from config
-uv run python src/run_perturbations.py \
+uv run python src/pipeline/run_perturbations.py \
   --input outputs/synthetic_adata.h5ad \
   --config configs/perturbation_config.json
 
 # Compare perturbation embeddings vs healthy baseline embeddings
-uv run python src/compute_comparisons.py \
+uv run python src/pipeline/compute_comparisons.py \
   --run-dir outputs/silver/perturbation_runs/<run_id> \
   --input outputs/synthetic_adata.h5ad
 ```

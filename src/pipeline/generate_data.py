@@ -6,7 +6,7 @@ The output AnnData mimics single-cell gene expression with:
 - per-gene metadata in `.var` (gene symbol, chromosome)
 
 Example:
-    python src/generate_data.py --n-cells 1000 --n-genes 500 --output data/synthetic.h5ad
+    python src/pipeline/generate_data.py --n-cells 1000 --n-genes 500 --output data/synthetic.h5ad
 """
 
 from __future__ import annotations
@@ -15,6 +15,13 @@ import argparse
 from pathlib import Path
 
 import anndata as ad
+
+from src.pipeline.helpers.artifact_io import (
+    make_writer,
+    resolve_io_for_cli,
+    to_logical_from_user_path,
+    write_h5ad_adata,
+)
 import numpy as np
 import pandas as pd
 from scipy import sparse
@@ -126,7 +133,6 @@ def build_synthetic_adata(
     x_counts = np.empty((n_cells, n_genes), dtype=np.int32)
     for start in range(0, n_cells, chunk_size):
         end = min(start + chunk_size, n_cells)
-        rows = end - start
 
         ct_idx = np.array([ct_to_idx[c] for c in cell_type[start:end]])
         donor_mult = np.array([donor_effect_map[d] for d in donor[start:end]])
@@ -185,13 +191,22 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=Path("data/synthetic_adata.h5ad"),
-        help="Output .h5ad path.",
+        help="Output .h5ad path (relative to repo unless absolute).",
+    )
+    parser.add_argument(
+        "--pipeline-config",
+        type=Path,
+        default=Path("configs/pipeline_config.json"),
+        help="Pipeline output backends (local_folder vs duckdb). Ignored if file is missing.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    repo, out_settings, _ = resolve_io_for_cli(args.pipeline_config)
+    writer = make_writer(repo, out_settings, "generate_data")
+
     adata = build_synthetic_adata(
         n_cells=args.n_cells,
         n_genes=args.n_genes,
@@ -200,10 +215,10 @@ def main() -> None:
         seed=args.seed,
     )
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    adata.write_h5ad(args.output)
+    logical = to_logical_from_user_path(args.output, repo)
+    write_h5ad_adata(writer, logical, adata)
 
-    print(f"Saved AnnData to: {args.output}")
+    print(f"Saved AnnData to logical path: {logical}")
     print(f"Shape: {adata.n_obs} cells x {adata.n_vars} genes")
     print("obs columns:", ", ".join(adata.obs.columns))
     print("var columns:", ", ".join(adata.var.columns))
@@ -211,37 +226,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-'''
-Implemented src/generate_data.py as a complete synthetic AnnData generator tailored to your pipeline-design use case.
-
-What it now does
-- Builds a scaled-down but realistic baseline dataset (default 1000 cells x 500 genes)
--Creates meaningful .obs metadata:
-   - cell_type
-   - donor
-   - batch
-- Creates meaningful .var metadata:
-    - gene_symbol
-    -chromosome
-    - gene_id
-    - is_target_gene
-- Simulates count-like expression with:
-    - gene-level baseline variation
-    - donor and batch effects
-    - cell-type marker programs
-    - overdispersed count noise (gamma-poisson / NB-like)
-- Stores helpful context in .uns for future perturbation workflows:
-    - target production scale (50k cells, 5k genes, 3 perturbation types)
-    - simulation parameters
-    - dataset description
-- Saves to .h5ad from CLI
-- Run it
-    - python src/generate_data.py
-- Optional:
-    - python src/generate_data.py --n-cells 2000 --n-genes 1000 --output data/synthetic_adata.h5ad
-'''

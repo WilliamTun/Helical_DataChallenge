@@ -8,7 +8,7 @@ This script:
 5) Writes per-experiment outputs and run-level metadata artifacts.
 
 Example:
-    uv run python src/run_perturbations.py \
+    uv run python src/pipeline/run_perturbations.py \
         --input outputs/synthetic_adata.h5ad \
         --config configs/perturbation_config.json
 """
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,21 @@ import numpy as np
 from anndata import AnnData
 from scipy import sparse
 
-from mock_model import run_model
+from src.pipeline.helpers.artifact_io import (
+    ensure_logical_exists,
+    GlobalReader,
+    make_writer,
+    read_h5ad,
+    resolve_io_for_cli,
+    run_id_from_logical_prefix,
+    to_logical_from_user_path,
+    write_json,
+    write_npz,
+    write_npy,
+)
+from src.pipeline.helpers.gold_export_helpers import perturbation_ui_record, run_scoped_payload
+from src.pipeline.helpers.io_config import PipelineOutputSettings
+from src.pipeline.helpers.mock_model import run_model
 
 
 ALLOWED_PERTURBATION_TYPES = {"gene_knockout", "gene_overexpression", "gene_activation"}
@@ -128,11 +141,15 @@ def _involved_values(adata: AnnData, column: str) -> list[str]:
 
 
 def run_perturbations(
-    adata: AnnData, config: dict[str, Any], run_dir: Path
+    adata: AnnData,
+    config: dict[str, Any],
+    run_id: str,
+    repo_root: Path,
+    output_settings: PipelineOutputSettings,
+    perturbation_runs_root_logical: str = "outputs/silver/perturbation_runs",
 ) -> dict[str, np.ndarray]:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    experiments_dir = run_dir / "experiments"
-    experiments_dir.mkdir(parents=True, exist_ok=True)
+    writer = make_writer(repo_root, output_settings, "run_perturbations")
+    run_prefix = f"{perturbation_runs_root_logical.rstrip('/')}/{run_id}"
 
     run_metadata = {
         "run_created_at_utc": datetime.now(UTC).isoformat(),
@@ -152,8 +169,7 @@ def run_perturbations(
             )
 
         exp_id = f"exp_{idx:04d}"
-        exp_dir = experiments_dir / exp_id
-        exp_dir.mkdir(parents=True, exist_ok=True)
+        exp_prefix = f"{run_prefix}/experiments/{exp_id}"
 
         perturbed = _apply_expression_perturbation(adata, spec)
         embeddings = run_model(perturbed)
@@ -164,22 +180,21 @@ def run_perturbations(
         target_row_idx = _resolve_target_row_indices(perturbed, spec)
         n_target_cells = int(target_row_idx.size)
 
-        np.save(exp_dir / "embeddings.npy", embeddings)
-        with (exp_dir / "metadata.json").open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "experiment_id": exp_id,
-                    "perturbation_spec": spec,
-                    "embedding_shape": list(embeddings.shape),
-                    "involved_donors": involved_donors,
-                    "involved_cell_types": involved_cell_types,
-                    "target_donors": target_donors,
-                    "target_cell_types": target_cell_types,
-                    "n_target_cells": n_target_cells,
-                },
-                f,
-                indent=2,
-            )
+        write_npy(writer, f"{exp_prefix}/embeddings.npy", embeddings)
+        write_json(
+            writer,
+            f"{exp_prefix}/metadata.json",
+            {
+                "experiment_id": exp_id,
+                "perturbation_spec": spec,
+                "embedding_shape": list(embeddings.shape),
+                "involved_donors": involved_donors,
+                "involved_cell_types": involved_cell_types,
+                "target_donors": target_donors,
+                "target_cell_types": target_cell_types,
+                "n_target_cells": n_target_cells,
+            },
+        )
 
         all_embeddings[exp_id] = embeddings
         records.append(
@@ -193,66 +208,60 @@ def run_perturbations(
                 "target_donors": target_donors,
                 "target_cell_types": target_cell_types,
                 "n_target_cells": n_target_cells,
-                "output_embeddings": str((exp_dir / "embeddings.npy").relative_to(run_dir)),
+                "output_embeddings": f"experiments/{exp_id}/embeddings.npy",
             }
         )
 
-    np.savez_compressed(run_dir / "all_embeddings.npz", **all_embeddings)
-    with (run_dir / "manifest.json").open("w", encoding="utf-8") as f:
-        json.dump({"run_metadata": run_metadata, "experiments": records}, f, indent=2)
+    write_npz(writer, f"{run_prefix}/all_embeddings.npz", all_embeddings)
+    write_json(writer, f"{run_prefix}/manifest.json", {"run_metadata": run_metadata, "experiments": records})
 
     return all_embeddings
 
 
-def export_gold_from_silver(run_dir: Path, gold_root: Path) -> None:
+def export_gold_from_silver(
+    repo_root: Path,
+    output_settings: PipelineOutputSettings,
+    reader: GlobalReader,
+    run_prefix_logical: str,
+    gold_root_logical: str,
+) -> None:
     """Create UI- and compute-oriented gold artifacts from silver outputs."""
-    manifest_path = run_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"Expected manifest in run dir: {run_dir}")
-    with manifest_path.open("r", encoding="utf-8") as f:
-        manifest = json.load(f)
+    manifest_path = f"{run_prefix_logical}/manifest.json"
+    ensure_logical_exists(reader, manifest_path, "Manifest")
+    manifest = reader.read_json(manifest_path)
 
-    run_id = run_dir.name
-    ui_dir = gold_root / "ui_input_data" / run_id
-    compute_dir = gold_root / "compute_input_data" / run_id
-    ui_dir.mkdir(parents=True, exist_ok=True)
-    compute_dir.mkdir(parents=True, exist_ok=True)
+    run_id = run_id_from_logical_prefix(run_prefix_logical)
+    writer = make_writer(repo_root, output_settings, "run_perturbations")
 
-    # UI-friendly lightweight overview records.
-    ui_records = []
-    for exp in manifest.get("experiments", []):
-        ui_records.append(
-            {
-                "experiment_id": exp.get("experiment_id"),
-                "perturbation_type": exp.get("perturbation_type"),
-                "gene": exp.get("gene"),
-                "genes": exp.get("genes"),
-                "involved_donors": exp.get("involved_donors", []),
-                "involved_cell_types": exp.get("involved_cell_types", []),
-                "target_donors": exp.get("target_donors", []),
-                "target_cell_types": exp.get("target_cell_types", []),
-                "n_target_cells": exp.get("n_target_cells"),
-            }
+    ui_records = [perturbation_ui_record(exp) for exp in manifest.get("experiments", [])]
+
+    gold_base = gold_root_logical.rstrip("/")
+    write_json(
+        writer,
+        f"{gold_base}/ui_input_data/{run_id}/perturbation_ui_records.json",
+        run_scoped_payload(
+            run_id=run_id,
+            run_metadata=manifest.get("run_metadata", {}),
+            experiments=ui_records,
+        ),
+    )
+
+    npz_path = f"{run_prefix_logical}/all_embeddings.npz"
+    if reader.exists(npz_path):
+        writer.write_bytes(
+            f"{gold_base}/compute_input_data/{run_id}/embeddings_all.npz",
+            reader.read_bytes(npz_path),
         )
 
-    with (ui_dir / "perturbation_ui_records.json").open("w", encoding="utf-8") as f:
-        json.dump(
-            {"run_id": run_id, "run_metadata": manifest.get("run_metadata", {}), "experiments": ui_records},
-            f,
-            indent=2,
-        )
-
-    # Compute-friendly index + packed embeddings.
-    all_embeddings_path = run_dir / "all_embeddings.npz"
-    if all_embeddings_path.exists():
-        shutil.copy2(all_embeddings_path, compute_dir / "embeddings_all.npz")
-
-    with (compute_dir / "experiment_index.json").open("w", encoding="utf-8") as f:
-        json.dump(
-            {"run_id": run_id, "run_metadata": manifest.get("run_metadata", {}), "experiments": manifest.get("experiments", [])},
-            f,
-            indent=2,
-        )
+    write_json(
+        writer,
+        f"{gold_base}/compute_input_data/{run_id}/experiment_index.json",
+        run_scoped_payload(
+            run_id=run_id,
+            run_metadata=manifest.get("run_metadata", {}),
+            experiments=list(manifest.get("experiments", [])),
+        ),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,94 +281,62 @@ def parse_args() -> argparse.Namespace:
         help="Path to perturbation config (.json).",
     )
     parser.add_argument(
+        "--pipeline-config",
+        type=Path,
+        default=Path("configs/pipeline_config.json"),
+        help="Pipeline output backends (local_folder vs duckdb). Ignored if file is missing.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("outputs/silver/perturbation_runs"),
-        help="Root folder where silver perturbation outputs are written.",
+        help="Root (under repo) where silver perturbation outputs are written.",
     )
     parser.add_argument(
         "--gold-root",
         type=Path,
         default=Path("outputs/gold"),
-        help="Root folder where gold UI/compute input artifacts are written.",
+        help="Root (under repo) where gold UI/compute input artifacts are written.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not args.input.exists():
-        raise FileNotFoundError(f"Input file not found: {args.input}")
+    repo, out_settings, reader = resolve_io_for_cli(args.pipeline_config)
+
+    input_logical = to_logical_from_user_path(args.input, repo)
+    ensure_logical_exists(reader, input_logical, "Input AnnData")
     if not args.config.exists():
         raise FileNotFoundError(f"Config file not found: {args.config}")
 
-    adata = ad.read_h5ad(args.input)
+    adata = read_h5ad(reader, input_logical)
     config = _read_config(args.config)
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = args.output_root / run_id
+    perturb_root_logical = to_logical_from_user_path(args.output_root, repo)
+    gold_root_logical = to_logical_from_user_path(args.gold_root, repo)
 
-    embeddings = run_perturbations(adata=adata, config=config, run_dir=run_dir)
-    export_gold_from_silver(run_dir=run_dir, gold_root=args.gold_root)
+    embeddings = run_perturbations(
+        adata=adata,
+        config=config,
+        run_id=run_id,
+        repo_root=repo,
+        output_settings=out_settings,
+        perturbation_runs_root_logical=perturb_root_logical,
+    )
+    run_prefix = f"{perturb_root_logical}/{run_id}"
+    export_gold_from_silver(
+        repo_root=repo,
+        output_settings=out_settings,
+        reader=reader,
+        run_prefix_logical=run_prefix,
+        gold_root_logical=gold_root_logical,
+    )
     print(f"Completed {len(embeddings)} perturbation experiments.")
-    print(f"Silver run outputs written to: {run_dir}")
-    print(f"Gold artifacts written under: {args.gold_root}")
+    print(f"Silver run logical prefix: {run_prefix}")
+    print(f"Gold artifacts under logical root: {gold_root_logical}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-'''
-
-Implemented a full perturbation runner with config-driven perturbation types and per-experiment outputs.
-
-Added files
-- src/run_perturbations.py
--configs/perturbation_config.json
-
-What the script does
-- Loads synthetic AnnData from --input
-- Reads perturbation settings/specs from --config
-- Loops through perturbation specs (gene/genes + perturbation_type)
-- Applies perturbation to expression (mocked behavior)
-- Calls run_model(adata) from src/mock_model.py
-- Saves outputs per perturbation experiment
-- Writes run-level metadata including all configured perturbation types used
-
-Output structure
-For each run, a timestamped folder is created under outputs/silver/perturbation_runs/<run_id>/:
-
-- manifest.json (run metadata + experiment index)
-- all_embeddings.npz (all experiment embeddings keyed by experiment id)
-- experiments/exp_0000/embeddings.npy
-- experiments/exp_0000/metadata.json
-
-
-manifest.json includes:
-- perturbation_types_defined
--input shape
-- experiment count
--mapping of each experiment to its embedding file
-
-Config format
-configs/perturbation_config.json defines:
-- perturbation_types: allowed types
-- perturbations: list of experiment specs
-Included all requested perturbation categories (mapped to config keys):
-
-- gene_knockout
-- gene_overexpression
-- gene_activation
-
-Verified
-Ran successfully:
-
-`uv run python src/run_perturbations.py --input outputs/synthetic_adata.h5ad --config configs/perturbation_config.json`
-
-Produced run outputs at:
-`outputs/silver/perturbation_runs/20260323T175115Z`
-
-'''

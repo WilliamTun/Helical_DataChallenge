@@ -1,7 +1,7 @@
 """Preview and summarize AnnData files for quick inspection.
 
 Example:
-    uv run python src/preview_data.py --input outputs/synthetic_adata.h5ad
+    uv run python src/pipeline/preview_data.py --input outputs/synthetic_adata.h5ad
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ import argparse
 from pathlib import Path
 
 import anndata as ad
+
+from src.pipeline.helpers.artifact_io import read_h5ad, resolve_io_for_cli, to_logical_from_user_path
 import numpy as np
 import pandas as pd
 from scipy import sparse
@@ -157,44 +159,27 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Maximum category counts shown per obs/var categorical column.",
     )
+    parser.add_argument(
+        "--pipeline-config",
+        type=Path,
+        default=Path("configs/pipeline_config.json"),
+        help="Pipeline output backends (for reading AnnData from local or DuckDB).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not args.input.exists():
-        raise FileNotFoundError(f"Input file not found: {args.input}")
+    repo, _, reader = resolve_io_for_cli(args.pipeline_config)
 
-    adata = ad.read_h5ad(args.input)
-    print(f"Loaded AnnData from: {args.input}")
+    logical = to_logical_from_user_path(args.input, repo)
+    if not reader.exists(logical):
+        raise FileNotFoundError(f"Input not found at logical path: {logical}")
+
+    adata = read_h5ad(reader, logical)
+    print(f"Loaded AnnData from: {logical}")
     summarize_adata(adata, max_categories=args.max_categories)
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-'''
-What the script shows
-- Dataset dimensions and matrix type:
-   - n_obs (cells), n_vars (genes), dtype, sparse/dense
-- Matrix-level overview:
-   - non-zero entries, density/sparsity, value range
-- Key descriptive statistics:
-   - per-cell total counts
-   - detected genes per cell
-   - per-gene total counts
-   - detected cells per gene
-   - includes percentiles (1%, 5%, 25%, 50%, 75%, 95%, 99%)
-- Metadata summaries:
-   - .obs column list + category counts / numeric describe
-   - .var column list + category counts / numeric describe / boolean counts
-   - .uns overview: keys and simple type info
-   - Small previews: head of .obs and .var
-
-'''
