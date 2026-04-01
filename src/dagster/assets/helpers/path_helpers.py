@@ -1,7 +1,5 @@
 """Path and partition helpers for Dagster assets."""
 
-from dagster import AssetExecutionContext
-
 from src.dagster.config import MockPipelineConfig
 from src.dagster.assets.helpers.io_helpers import load_settings_optional, make_reader, repo_root
 
@@ -12,10 +10,6 @@ def normalize_logical_path(path: str) -> str:
 
 def normalize_logical_root(path: str) -> str:
     return path.replace("\\", "/").rstrip("/")
-
-
-def resolve_dataset_version(context: AssetExecutionContext, config: MockPipelineConfig) -> str:
-    return context.partition_key or config.dataset_version
 
 
 def resolve_io(config: MockPipelineConfig):
@@ -35,6 +29,5 @@ __all__ = [
     "normalize_logical_path",
     "normalize_logical_root",
     "resolve_optional_baseline_path",
-    "resolve_dataset_version",
     "resolve_io",
 ]

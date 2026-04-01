@@ -26,18 +26,22 @@ class MockPipelineConfig(Config):
     #: ``generate`` — run ``build_synthetic_adata`` and write. ``external`` — assume AnnData
     #: already exists at ``synthetic_adata_path`` (e.g. written by CLI or file sensor).
     synthetic_adata_materialization_mode: str = "generate"
-    # User-supplied dataset version label. This is also used as the Dagster partition key
-    # for the dataset and all downstream lineage assets.
-    dataset_version: str = "default"
     # If true, typed perturbation and comparison assets reuse existing artifacts when
     # the memoization token (input fingerprints + config + model version) is unchanged.
     enable_memoization: bool = True
     # Number of perturbation experiments grouped into each dynamic experiment batch.
     perturbation_batch_size: int = 1
-    # Optional dynamic-batch filter for perturbation type in UI run config.
-    selected_perturbation_type: Literal[
-        "all",
-        "gene_knockout",
-        "gene_overexpression",
-        "gene_activation",
-    ] = "all"
+
+
+class PerturbationPipelineConfig(MockPipelineConfig):
+    """Config for assets that run the mock embedding model on perturbations.
+
+    ``model_name`` applies only to these steps—not to synthetic data, preview, or comparison.
+    Downstream comparison assets record the model as reference metadata from upstream outputs.
+    """
+
+    model_name: Literal[
+        "mock_foundation_model_1",
+        "mock_foundation_model_2",
+        "mock_foundation_model_3",
+    ] = "mock_foundation_model_1"

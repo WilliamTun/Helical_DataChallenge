@@ -1,0 +1,15 @@
+{
+  "pipeline_output": {
+    "default_backend": "duckdb",
+    "duckdb": {
+      "database_path": ".data/pipeline.duckdb",
+      "artifacts_table": "pipeline_artifacts"
+    },
+    "steps": {
+      "generate_data": { "backend": null },
+      "preview_data": { "backend": null },
+      "run_perturbations": { "backend": null },
+      "compute_comparisons": { "backend": null }
+    }
+  }
+}

@@ -11,7 +11,7 @@ DYNAMIC_BATCH_SELECTION = AssetSelection.assets(
     comparison_results_batch,
 )
 
-_DYNAMIC_DEFAULT_CONFIG = build_dynamic_batch_run_config(dataset_version="default")
+_DYNAMIC_DEFAULT_CONFIG = build_dynamic_batch_run_config()
 
 mock_pipeline_dynamic_batch_job = define_asset_job(
     name="mock_pipeline_dynamic_batch_job",

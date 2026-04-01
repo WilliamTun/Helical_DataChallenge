@@ -14,7 +14,6 @@ from dagster import (
 
 from src.dagster.config import MockPipelineConfig
 from src.dagster.lineage.fingerprints import combine_version_token, fingerprint_stored_artifact
-from src.dagster.partitions import dataset_version_partitions
 from src.dagster.assets.helpers.io_helpers import (
     load_settings_optional,
     make_reader,
@@ -23,14 +22,9 @@ from src.dagster.assets.helpers.io_helpers import (
     repo_root,
     summarize_adata,
 )
-from src.dagster.assets.helpers.metadata_helpers import model_meta, runtime_metadata
-from src.dagster.assets.helpers.path_helpers import (
-    resolve_dataset_version,
-)
-
+from src.dagster.assets.helpers.metadata_helpers import model_technical_meta, runtime_metadata
 @asset(
     group_name="mock_pipeline",
-    partitions_def=dataset_version_partitions,
     freshness_policy=FreshnessPolicy.time_window(fail_window=timedelta(hours=12)),
     metadata={
         "lineage_role": MetadataValue.text("QA summary of the AnnData (prints to compute logs)."),
@@ -40,7 +34,6 @@ from src.dagster.assets.helpers.path_helpers import (
 def preview_data(context: AssetExecutionContext, config: MockPipelineConfig, synthetic_adata: str) -> MaterializeResult:
     started = perf_counter()
     root = repo_root()
-    dataset_version = resolve_dataset_version(context, config)
     out_settings = load_settings_optional(root, root / config.pipeline_config_path)
     reader = make_reader(root, out_settings)
     adata = read_h5ad(reader, synthetic_adata)
@@ -50,14 +43,12 @@ def preview_data(context: AssetExecutionContext, config: MockPipelineConfig, syn
     return MaterializeResult(
         value=synthetic_adata,
         metadata={
-            "dataset_version": MetadataValue.text(dataset_version),
             **runtime_metadata(started),
-            **model_meta(),
+            **model_technical_meta(),
         },
-        data_version=DataVersion(combine_version_token("preview_data", dataset_version, dfp)),
+        data_version=DataVersion(combine_version_token("preview_data", synthetic_adata, dfp)),
         tags={
             "lineage/asset_role": "preview",
-            "dataset_version": dataset_version,
             "model_version": str(model_info["model_version"]),
         },
     )

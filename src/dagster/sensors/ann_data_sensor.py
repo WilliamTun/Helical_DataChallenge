@@ -21,44 +21,30 @@ from dagster import (
 
 from src.dagster.jobs.mock_pipeline_job import mock_pipeline_job
 from src.dagster.project import repo_root
-from src.dagster.partitions import dataset_version_partitions
 from src.dagster.run_config_defaults import (
     build_mock_pipeline_run_config,
     to_repo_relative_logical,
 )
 
-ENV_DATASET_VERSION = "DAGSTER_DATASET_VERSION"
 ENV_SENSOR_REL_PATH = "DAGSTER_ANN_DATA_SENSOR_REL_PATH"
 ENV_SENSOR_INTERVAL_SEC = "DAGSTER_ANN_DATA_SENSOR_INTERVAL_SEC"
 
 
-def _watched_ann_data_path(*, dataset_version: str) -> Path:
-    rel_template = os.environ.get(
-        ENV_SENSOR_REL_PATH,
-        "outputs/synthetic_adata.h5ad",
-    )
-    rel = rel_template.replace("{dataset_version}", dataset_version)
+def _watched_ann_data_path() -> Path:
+    rel = os.environ.get(ENV_SENSOR_REL_PATH, "outputs/synthetic_adata.h5ad")
     return repo_root() / rel
 
 
-def _resolve_dataset_version_and_path() -> tuple[str, Path] | None:
-    """Return (dataset_version, watched_path) or None if fallback path not present yet."""
-    base_dataset_version = os.environ.get(ENV_DATASET_VERSION)
-    path = _watched_ann_data_path(dataset_version=base_dataset_version or "unknown")
-    if base_dataset_version is None:
-        if not path.is_file():
-            return None
-        st = path.stat()
-        dataset_version = os.environ.get(ENV_DATASET_VERSION, f"mtime_{st.st_mtime_ns}")
-        return dataset_version, path
-
-    dataset_version = base_dataset_version
-    return dataset_version, _watched_ann_data_path(dataset_version=dataset_version)
+def _resolve_watched_path() -> Path | None:
+    """Return watched path or None if file not present yet."""
+    path = _watched_ann_data_path()
+    if not path.is_file():
+        return None
+    return path
 
 
-def _build_run_config(dataset_version: str, watched_path: Path) -> dict:
+def _build_run_config(watched_path: Path) -> dict:
     return build_mock_pipeline_run_config(
-        dataset_version=dataset_version,
         synthetic_adata_materialization_mode="external",
         synthetic_adata_path=to_repo_relative_logical(watched_path, repo_root()),
     )
@@ -71,12 +57,11 @@ def _build_run_config(dataset_version: str, watched_path: Path) -> dict:
 )
 def ann_data_sensor(context: SensorEvaluationContext):
     """Fire a pipeline run when the watched ``.h5ad`` file appears or its mtime/size changes."""
-    resolved = _resolve_dataset_version_and_path()
-    if resolved is None:
-        path = _watched_ann_data_path(dataset_version="unknown")
+    path = _resolve_watched_path()
+    if path is None:
+        path = _watched_ann_data_path()
         yield SkipReason(f"AnnData file not present yet: {path}")
         return
-    dataset_version, path = resolved
 
     if not path.is_file():
         yield SkipReason(f"AnnData file not present yet: {path}")
@@ -86,15 +71,12 @@ def ann_data_sensor(context: SensorEvaluationContext):
     cursor_key = f"{st.st_mtime_ns}:{st.st_size}"
     if context.cursor == cursor_key:
         return
-    add_partition_request = dataset_version_partitions.build_add_request([dataset_version])
     yield SensorResult(
         cursor=cursor_key,
-        dynamic_partitions_requests=[add_partition_request],
         run_requests=[
             RunRequest(
                 run_key=f"ann_data_{cursor_key}",
-                partition_key=dataset_version,
-                run_config=_build_run_config(dataset_version, path),
+                run_config=_build_run_config(path),
             )
         ],
     )

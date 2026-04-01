@@ -7,10 +7,21 @@ from dagster import MetadataValue
 from src.dagster.assets.helpers.io_helpers import mock_model_version_info
 
 
-def model_meta() -> dict[str, MetadataValue]:
-    info = mock_model_version_info()
+def model_meta(model_name: str | None = None) -> dict[str, MetadataValue]:
+    """Full model identity metadata (use on perturbation assets and comparison reference lines)."""
+    info = mock_model_version_info(model_name)
     return {
         "model_name": MetadataValue.text(str(info["model_name"])),
+        "model_version": MetadataValue.text(str(info["model_version"])),
+        "embedding_dim": MetadataValue.int(int(info["embedding_dim"])),
+        "embedding_dtype": MetadataValue.text(str(info["embedding_dtype"])),
+    }
+
+
+def model_technical_meta() -> dict[str, MetadataValue]:
+    """Mock stack version and embedding shape without a configurable ``model_name`` (synthetic/preview)."""
+    info = mock_model_version_info()
+    return {
         "model_version": MetadataValue.text(str(info["model_version"])),
         "embedding_dim": MetadataValue.int(int(info["embedding_dim"])),
         "embedding_dtype": MetadataValue.text(str(info["embedding_dtype"])),
@@ -42,4 +53,4 @@ def slug(value: str) -> str:
     return "".join(out).strip("_") or "default"
 
 
-__all__ = ["compact", "model_meta", "runtime_metadata", "slug"]
+__all__ = ["compact", "model_meta", "model_technical_meta", "runtime_metadata", "slug"]

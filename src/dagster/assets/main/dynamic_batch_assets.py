@@ -5,6 +5,7 @@ from time import perf_counter
 from typing import Any
 
 from dagster import (
+    AllPartitionMapping,
     AssetDep,
     AssetExecutionContext,
     AssetKey,
@@ -12,7 +13,6 @@ from dagster import (
     FreshnessPolicy,
     MaterializeResult,
     MetadataValue,
-    MultiToSingleDimensionPartitionMapping,
     asset,
 )
 
@@ -24,7 +24,7 @@ from src.dagster.assets.helpers.io_helpers import (
     read_h5ad,
     run_perturbations,
 )
-from src.dagster.assets.helpers.metadata_helpers import compact, model_meta, runtime_metadata, slug
+from src.dagster.assets.helpers.metadata_helpers import compact, model_meta, runtime_metadata
 from src.dagster.assets.helpers.path_helpers import (
     normalize_logical_path,
     normalize_logical_root,
@@ -32,7 +32,7 @@ from src.dagster.assets.helpers.path_helpers import (
     resolve_optional_baseline_path,
 )
 from src.dagster.assets.helpers.perturbation_helpers import get_batch_by_key, load_perturbation_batches
-from src.dagster.config import MockPipelineConfig
+from src.dagster.config import MockPipelineConfig, PerturbationPipelineConfig
 from src.dagster.lineage.fingerprints import (
     combine_version_token,
     fingerprint_local_file,
@@ -44,11 +44,11 @@ PERTURBATION_BATCH_ROLE = "embeddings_silver_batch"
 COMPARISON_BATCH_ROLE = "comparison_silver_batch"
 
 
-def _partition_keys(context: AssetExecutionContext, config: MockPipelineConfig) -> tuple[str, str]:
+def _partition_keys(context: AssetExecutionContext) -> tuple[str, str]:
     keys = context.partition_key.keys_by_dimension if context.partition_key else {}
-    dataset_version = keys.get("dataset_version", config.dataset_version)
+    perturbation_type = keys.get("perturbation_type", "gene_knockout")
     experiment_batch = keys.get("experiment_batch", "batch_0000")
-    return dataset_version, experiment_batch
+    return perturbation_type, experiment_batch
 
 
 def _comparison_paths(config: MockPipelineConfig, run_id: str) -> tuple[str, str, str]:
@@ -58,19 +58,17 @@ def _comparison_paths(config: MockPipelineConfig, run_id: str) -> tuple[str, str
     return comparison_results_root, gold_root, results_prefix
 
 
-def _skipped_comparison_batch_result(
-    dataset_version: str, batch_key: str, started: float
-) -> MaterializeResult:
+def _skipped_comparison_batch_result(perturbation_type: str, batch_key: str, started: float) -> MaterializeResult:
     return MaterializeResult(
         value={"results_prefix_logical": None, "skipped": True},
         metadata={
-            "dataset_version": MetadataValue.text(dataset_version),
+            "perturbation_type": MetadataValue.text(perturbation_type),
             "experiment_batch": MetadataValue.text(batch_key),
             "status": MetadataValue.text("skipped_upstream_batch"),
             **runtime_metadata(started),
         },
         data_version=DataVersion(
-            combine_version_token("comparison_results_batch", dataset_version, batch_key, "skipped")
+            combine_version_token("comparison_results_batch", perturbation_type, batch_key, "skipped")
         ),
     )
 
@@ -79,86 +77,77 @@ def _skipped_comparison_batch_result(
     group_name="mock_pipeline_dynamic",
     partitions_def=dataset_batch_partitions,
     freshness_policy=FreshnessPolicy.time_window(fail_window=timedelta(hours=6)),
-    deps=[
-        AssetDep(
-            AssetKey("synthetic_adata"),
-            partition_mapping=MultiToSingleDimensionPartitionMapping("dataset_version"),
-        )
-    ],
+    deps=[AssetDep(AssetKey("synthetic_adata"), partition_mapping=AllPartitionMapping())],
     metadata={
         "lineage_role": MetadataValue.text("Dynamic batch fan-out perturbation execution."),
         "lineage_layer": MetadataValue.text("silver"),
     },
 )
 def perturbation_run_batch(
-    context: AssetExecutionContext, config: MockPipelineConfig
+    context: AssetExecutionContext, config: PerturbationPipelineConfig
 ) -> MaterializeResult:
     started = perf_counter()
     root, out_settings, reader = resolve_io(config)
-    dataset_version, batch_key = _partition_keys(context, config)
+    perturbation_type, batch_key = _partition_keys(context)
     batch = get_batch_by_key(config, batch_key)
-    model_info = mock_model_version_info()
+    model_info = mock_model_version_info(config.model_name)
     synthetic_adata = normalize_logical_path(config.synthetic_adata_path)
 
     if not reader.exists(synthetic_adata):
         raise FileNotFoundError(
             "Dynamic batch run requires source AnnData to exist at "
-            f"{synthetic_adata!r}. Materialize 'synthetic_adata' for dataset_version "
-            f"{dataset_version!r} first, then retry this batch partition."
+            f"{synthetic_adata!r}. Materialize 'synthetic_adata' first, then retry this "
+            "batch partition."
         )
 
     if batch is None:
         return MaterializeResult(
-            value={"batch_key": batch_key, "skipped": True},
+            value={"batch_key": batch_key, "skipped": True, "embedding_model_name": config.model_name},
             metadata={
-                "dataset_version": MetadataValue.text(dataset_version),
+                "perturbation_type": MetadataValue.text(perturbation_type),
                 "experiment_batch": MetadataValue.text(batch_key),
                 "status": MetadataValue.text("skipped_missing_batch"),
                 **runtime_metadata(started),
-                **model_meta(),
+                **model_meta(config.model_name),
             },
             data_version=DataVersion(
-                combine_version_token("perturbation_run_batch", dataset_version, batch_key, "missing")
+                combine_version_token("perturbation_run_batch", perturbation_type, batch_key, "missing")
             ),
-            tags={"dataset_version": dataset_version, "experiment_batch": batch_key, "status": "skipped"},
+            tags={"perturbation_type": perturbation_type, "experiment_batch": batch_key, "status": "skipped"},
         )
 
-    selected_type = str(config.selected_perturbation_type)
-    selected_specs = list(batch.get("perturbations", []))
-    if selected_type != "all":
-        selected_specs = [
-            spec
-            for spec in selected_specs
-            if str(spec.get("perturbation_type", "")).strip().lower() == selected_type
-        ]
-        if not selected_specs:
-            return MaterializeResult(
-                value={
-                    "run_prefix_logical": None,
-                    "synthetic_adata_logical": synthetic_adata,
-                    "experiment_batch": batch_key,
-                    "skipped": True,
-                },
-                metadata={
-                    "dataset_version": MetadataValue.text(dataset_version),
-                    "experiment_batch": MetadataValue.text(batch_key),
-                    "selected_perturbation_type": MetadataValue.text(selected_type),
-                    "status": MetadataValue.text("skipped_no_matching_selected_perturbation_type"),
-                    **runtime_metadata(started),
-                    **model_meta(),
-                },
-                data_version=DataVersion(
-                    combine_version_token(
-                        "perturbation_run_batch", dataset_version, batch_key, selected_type, "empty"
-                    )
-                ),
-                tags={
-                    "dataset_version": dataset_version,
-                    "experiment_batch": batch_key,
-                    "selected_perturbation_type": selected_type,
-                    "status": "skipped",
-                },
-            )
+    selected_specs = [
+        spec
+        for spec in list(batch.get("perturbations", []))
+        if str(spec.get("perturbation_type", "")).strip().lower() == perturbation_type
+    ]
+    if not selected_specs:
+        return MaterializeResult(
+            value={
+                "run_prefix_logical": None,
+                "synthetic_adata_logical": synthetic_adata,
+                "experiment_batch": batch_key,
+                "skipped": True,
+                "embedding_model_name": config.model_name,
+            },
+            metadata={
+                "perturbation_type": MetadataValue.text(perturbation_type),
+                "experiment_batch": MetadataValue.text(batch_key),
+                "status": MetadataValue.text("skipped_no_matching_partition_perturbation_type"),
+                **runtime_metadata(started),
+                **model_meta(config.model_name),
+            },
+            data_version=DataVersion(
+                combine_version_token(
+                    "perturbation_run_batch", perturbation_type, batch_key, "empty"
+                )
+            ),
+            tags={
+                "perturbation_type": perturbation_type,
+                "experiment_batch": batch_key,
+                "status": "skipped",
+            },
+        )
 
     adata = read_h5ad(reader, synthetic_adata)
     perturbation_runs_root = normalize_logical_root(config.perturbation_runs_root)
@@ -168,14 +157,14 @@ def perturbation_run_batch(
     cfg_fp = fingerprint_local_file(root, f"{config.perturbation_config_path}")
     memo_token = combine_version_token(
         "perturbation_batch",
-        dataset_version,
+        perturbation_type,
         batch_key,
-        selected_type,
+        str(model_info["model_name"]),
         dataset_fp,
         cfg_fp,
         str(model_info["model_version"]),
     )
-    run_id = f"{slug(dataset_version)}__{batch_key}__{memo_token[:12]}"
+    run_id = f"{perturbation_type}__{batch_key}__{memo_token[:12]}"
     run_prefix = f"{perturbation_runs_root}/{run_id}"
     manifest_path = f"{run_prefix}/manifest.json"
     cache_hit = bool(config.enable_memoization and reader.exists(manifest_path))
@@ -184,11 +173,7 @@ def perturbation_run_batch(
         run_perturbations(
             adata=adata,
             config={
-                "perturbation_types": (
-                    [selected_type]
-                    if selected_type != "all"
-                    else list(batch.get("perturbation_types", []))
-                ),
+                "perturbation_types": [perturbation_type],
                 "perturbations": selected_specs,
             },
             run_id=run_id,
@@ -211,30 +196,29 @@ def perturbation_run_batch(
             "synthetic_adata_logical": synthetic_adata,
             "experiment_batch": batch_key,
             "skipped": False,
+            "embedding_model_name": config.model_name,
         },
         metadata={
-            "dataset_version": MetadataValue.text(dataset_version),
+            "perturbation_type": MetadataValue.text(perturbation_type),
             "experiment_batch": MetadataValue.text(batch_key),
-            "selected_perturbation_type": MetadataValue.text(selected_type),
             "n_experiments": MetadataValue.int(len(selected_specs)),
             "memoization_token": MetadataValue.text(memo_token),
             "memoization_cache_hit": MetadataValue.bool(cache_hit),
             "run_prefix_logical": MetadataValue.text(run_prefix),
             **runtime_metadata(started),
-            **model_meta(),
+            **model_meta(config.model_name),
         },
         data_version=DataVersion(
-            combine_version_token("perturbation_run_batch", dataset_version, batch_key, memo_token)
+            combine_version_token("perturbation_run_batch", perturbation_type, batch_key, memo_token)
         ),
         tags={
             "lineage/asset_role": PERTURBATION_BATCH_ROLE,
-            "dataset_version": dataset_version,
+            "perturbation_type": perturbation_type,
             "experiment_batch": batch_key,
             "model_version": str(model_info["model_version"]),
+            "model_name": str(model_info["model_name"]),
             "cache_hit": "true" if cache_hit else "false",
-            "perturbation_types": compact(
-                [selected_type] if selected_type != "all" else list(batch.get("perturbation_types", []))
-            ),
+            "perturbation_types": compact([perturbation_type]),
         },
     )
 
@@ -255,11 +239,11 @@ def comparison_results_batch(
 ) -> MaterializeResult:
     started = perf_counter()
     if bool(perturbation_run_batch.get("skipped")):
-        dataset_version, batch_key = _partition_keys(context, config)
-        return _skipped_comparison_batch_result(dataset_version, batch_key, started)
+        perturbation_type, batch_key = _partition_keys(context)
+        return _skipped_comparison_batch_result(perturbation_type, batch_key, started)
 
     root, out_settings, reader = resolve_io(config)
-    dataset_version, batch_key = _partition_keys(context, config)
+    perturbation_type, batch_key = _partition_keys(context)
     run_prefix = str(perturbation_run_batch["run_prefix_logical"])
     run_id = run_prefix.rstrip("/").split("/")[-1]
     comparison_results_root, gold_root, results_prefix = _comparison_paths(config, run_id)
@@ -286,31 +270,35 @@ def comparison_results_batch(
         gold_root_logical=gold_root,
     )
     manifest_fp = fingerprint_stored_artifact(root, reader, f"{results_prefix}/comparison_manifest.json")
-    model_info = mock_model_version_info()
+    ref_name = perturbation_run_batch.get("embedding_model_name")
+    ref_name_str = str(ref_name) if ref_name is not None else None
+    model_info = mock_model_version_info(ref_name_str)
     return MaterializeResult(
         value={"results_prefix_logical": results_prefix, "experiment_batch": batch_key, "skipped": False},
         metadata={
-            "dataset_version": MetadataValue.text(dataset_version),
+            "perturbation_type": MetadataValue.text(perturbation_type),
             "experiment_batch": MetadataValue.text(batch_key),
             "results_prefix_logical": MetadataValue.text(results_prefix),
             "memoization_cache_hit": MetadataValue.bool(cache_hit),
             **runtime_metadata(started),
-            **model_meta(),
+            **model_meta(ref_name_str),
         },
         data_version=DataVersion(
             combine_version_token(
                 "comparison_results_batch",
-                dataset_version,
+                perturbation_type,
                 batch_key,
                 manifest_fp,
                 str(model_info["model_version"]),
+                str(model_info["model_name"]),
             )
         ),
         tags={
             "lineage/asset_role": COMPARISON_BATCH_ROLE,
-            "dataset_version": dataset_version,
+            "perturbation_type": perturbation_type,
             "experiment_batch": batch_key,
             "model_version": str(model_info["model_version"]),
+            "model_name": str(model_info["model_name"]),
             "cache_hit": "true" if cache_hit else "false",
         },
     )

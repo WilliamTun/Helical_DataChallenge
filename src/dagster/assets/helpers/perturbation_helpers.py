@@ -4,7 +4,7 @@ from typing import Any
 
 from dagster import AssetExecutionContext, DataVersion, MaterializeResult, MetadataValue
 
-from src.dagster.config import MockPipelineConfig
+from src.dagster.config import MockPipelineConfig, PerturbationPipelineConfig
 from src.dagster.lineage.fingerprints import (
     combine_version_token,
     fingerprint_local_file,
@@ -18,7 +18,7 @@ from src.dagster.assets.helpers.io_helpers import (
     run_perturbations,
 )
 from src.dagster.assets.helpers.metadata_helpers import compact, model_meta, runtime_metadata, slug
-from src.dagster.assets.helpers.path_helpers import normalize_logical_root, resolve_dataset_version, resolve_io
+from src.dagster.assets.helpers.path_helpers import normalize_logical_root, resolve_io
 
 
 def perturbation_lineage(manifest: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
@@ -67,7 +67,7 @@ def get_batch_by_key(config: MockPipelineConfig, batch_key: str) -> dict[str, An
 
 def run_perturbation_type(
     context: AssetExecutionContext,
-    config: MockPipelineConfig,
+    config: PerturbationPipelineConfig,
     synthetic_adata: str,
     perturbation_type: str,
 ) -> MaterializeResult:
@@ -75,7 +75,6 @@ def run_perturbation_type(
 
     started = perf_counter()
     root, out_settings, reader = resolve_io(config)
-    dataset_version = resolve_dataset_version(context, config)
     adata = read_h5ad(reader, synthetic_adata)
     cfg = _read_config(root / config.perturbation_config_path)
     filtered = [
@@ -83,32 +82,38 @@ def run_perturbation_type(
         for spec in cfg.get("perturbations", [])
         if str(spec.get("perturbation_type", "")).strip().lower() == perturbation_type
     ]
-    model_info = mock_model_version_info()
+    model_info = mock_model_version_info(config.model_name)
     if not filtered:
         out = {
             "run_prefix_logical": None,
             "synthetic_adata_logical": synthetic_adata,
             "perturbation_type": perturbation_type,
             "skipped": True,
+            "embedding_model_name": config.model_name,
         }
         return MaterializeResult(
             value=out,
             metadata={
-                "dataset_version": MetadataValue.text(dataset_version),
                 "perturbation_type": MetadataValue.text(perturbation_type),
                 "n_experiments": MetadataValue.int(0),
                 "status": MetadataValue.text("skipped_no_matching_specs"),
                 **runtime_metadata(started),
-                **model_meta(),
+                **model_meta(config.model_name),
             },
             data_version=DataVersion(
-                combine_version_token("perturbation_run", dataset_version, perturbation_type, "empty")
+                combine_version_token(
+                    "perturbation_run",
+                    synthetic_adata,
+                    perturbation_type,
+                    str(model_info["model_name"]),
+                    "empty",
+                )
             ),
             tags={
                 "lineage/asset_role": "embeddings_silver",
-                "dataset_version": dataset_version,
                 "perturbation_type": perturbation_type,
                 "model_version": str(model_info["model_version"]),
+                "model_name": str(model_info["model_name"]),
                 "status": "skipped",
             },
         )
@@ -119,13 +124,14 @@ def run_perturbation_type(
     cfg_fp = fingerprint_local_file(root, f"{config.perturbation_config_path}")
     memo_token = combine_version_token(
         "perturbation_typed",
-        dataset_version,
+        synthetic_adata,
         perturbation_type,
+        str(model_info["model_name"]),
         dataset_fp,
         cfg_fp,
         str(model_info["model_version"]),
     )
-    run_id = f"{slug(dataset_version)}__{perturbation_type}__{memo_token[:12]}"
+    run_id = f"{slug(perturbation_type)}__{memo_token[:12]}"
     run_prefix = f"{perturb_root}/{run_id}"
     manifest_path = f"{run_prefix}/manifest.json"
     cache_hit = bool(config.enable_memoization and reader.exists(manifest_path))
@@ -160,13 +166,13 @@ def run_perturbation_type(
         "synthetic_adata_logical": synthetic_adata,
         "perturbation_type": perturbation_type,
         "skipped": False,
+        "embedding_model_name": config.model_name,
     }
     return MaterializeResult(
         value=out,
         metadata={
             "run_id": MetadataValue.text(run_id),
             "run_prefix_logical": MetadataValue.text(run_prefix),
-            "dataset_version": MetadataValue.text(dataset_version),
             "memoization_token": MetadataValue.text(memo_token),
             "memoization_cache_hit": MetadataValue.bool(cache_hit),
             "input_dataset_fingerprint": MetadataValue.text(dataset_fp),
@@ -178,23 +184,24 @@ def run_perturbation_type(
             "target_cell_types": MetadataValue.json(target_cell_types),
             "target_donors": MetadataValue.json(target_donors),
             **runtime_metadata(started),
-            **model_meta(),
+            **model_meta(config.model_name),
         },
         data_version=DataVersion(
             combine_version_token(
                 "perturbation_run",
-                dataset_version,
+                synthetic_adata,
                 perturbation_type,
                 run_id,
                 dataset_fp,
                 emb_fp,
                 str(model_info["model_version"]),
+                str(model_info["model_name"]),
             )
         ),
         tags={
             "lineage/asset_role": "embeddings_silver",
-            "dataset_version": dataset_version,
             "model_version": str(model_info["model_version"]),
+            "model_name": str(model_info["model_name"]),
             "run_id": run_id,
             "perturbation_type": perturbation_type,
             "cache_hit": "true" if cache_hit else "false",

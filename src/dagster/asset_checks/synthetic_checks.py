@@ -37,8 +37,8 @@ def synthetic_adata_has_expected_schema(config: MockPipelineConfig) -> AssetChec
     if not reader.exists(synthetic_adata_logical):
         raise FileNotFoundError(
             "Synthetic AnnData not found at "
-            f"{synthetic_adata_logical!r}. Materialize 'synthetic_adata' for the selected "
-            "dataset_version first (or point synthetic_adata_path to an existing file)."
+            f"{synthetic_adata_logical!r}. Materialize 'synthetic_adata' first "
+            "(or point synthetic_adata_path to an existing file)."
         )
     adata = read_h5ad(reader, synthetic_adata_logical)
 

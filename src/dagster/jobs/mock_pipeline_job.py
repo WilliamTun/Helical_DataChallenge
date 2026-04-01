@@ -11,7 +11,6 @@ from src.dagster.assets import (
     preview_data,
     synthetic_adata,
 )
-from src.dagster.partitions import dataset_version_partitions
 from src.dagster.run_config_defaults import build_mock_pipeline_run_config
 
 MOCK_PIPELINE_SELECTION = AssetSelection.assets(
@@ -24,13 +23,12 @@ MOCK_PIPELINE_SELECTION = AssetSelection.assets(
     comparison_results,
 )
 
-_MOCK_PIPELINE_DEFAULT_CONFIG = build_mock_pipeline_run_config(dataset_version="default")
+_MOCK_PIPELINE_DEFAULT_CONFIG = build_mock_pipeline_run_config()
 
 mock_pipeline_job = define_asset_job(
     name="mock_pipeline_job",
     description="End-to-end mock perturbation pipeline with lineage metadata on each asset.",
     selection=MOCK_PIPELINE_SELECTION,
-    partitions_def=dataset_version_partitions,
     config=_MOCK_PIPELINE_DEFAULT_CONFIG,
     tags={
         "pipeline": "mock_perturbation",

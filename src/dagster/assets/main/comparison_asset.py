@@ -15,7 +15,6 @@ from dagster import (
 
 from src.dagster.config import MockPipelineConfig
 from src.dagster.lineage.fingerprints import combine_version_token, fingerprint_stored_artifact
-from src.dagster.partitions import dataset_version_partitions
 from src.dagster.assets.helpers.io_helpers import (
     compute_comparisons,
     export_comparison_gold,
@@ -29,7 +28,6 @@ from src.dagster.assets.helpers.metadata_helpers import (
 from src.dagster.assets.helpers.path_helpers import (
     normalize_logical_root,
     resolve_optional_baseline_path,
-    resolve_dataset_version,
     resolve_io,
 )
 from src.dagster.assets.helpers.perturbation_helpers import perturbation_lineage
@@ -51,7 +49,6 @@ def _collect_lineage_dimensions(
 
 @asset(
     group_name="mock_pipeline",
-    partitions_def=dataset_version_partitions,
     freshness_policy=FreshnessPolicy.time_window(fail_window=timedelta(hours=6)),
     metadata={
         "lineage_role": MetadataValue.text("Silver comparison metrics vs baseline embeddings."),
@@ -65,12 +62,13 @@ def comparison_results(
 ) -> MaterializeResult:
     started = perf_counter()
     root, out_settings, reader = resolve_io(config)
-    dataset_version = resolve_dataset_version(context, config)
     baseline_logical = resolve_optional_baseline_path(config)
     comparison_results_root = normalize_logical_root(config.comparison_results_root)
     gold_root = normalize_logical_root(config.gold_root)
 
     runs_by_type: dict[str, dict[str, Any]] = dict(perturbation_run.get("runs_by_type", {}))
+    ref_model_name = perturbation_run.get("embedding_model_name")
+    ref_model_name_str = str(ref_model_name) if ref_model_name is not None else None
     results_by_type: dict[str, str] = {}
     target_cell_types_all: list[str] = []
     target_donors_all: list[str] = []
@@ -109,14 +107,13 @@ def comparison_results(
         target_donors_all.extend(dns)
         fps.append(fingerprint_stored_artifact(root, reader, f"{results_prefix}/comparison_manifest.json"))
 
-    model_info = mock_model_version_info()
+    model_info = mock_model_version_info(ref_model_name_str)
     perturbation_types = sorted(results_by_type.keys())
     target_cell_types = sorted(set(target_cell_types_all))
     target_donors = sorted(set(target_donors_all))
     return MaterializeResult(
         value={"results_by_type": results_by_type},
         metadata={
-            "dataset_version": MetadataValue.text(dataset_version),
             "n_result_sets": MetadataValue.int(len(results_by_type)),
             "memoization_cache_hits": MetadataValue.int(cache_hit_count),
             "memoization_cache_misses": MetadataValue.int(cache_miss_count),
@@ -125,20 +122,20 @@ def comparison_results(
             "target_cell_types": MetadataValue.json(target_cell_types),
             "target_donors": MetadataValue.json(target_donors),
             **runtime_metadata(started),
-            **model_meta(),
+            **model_meta(ref_model_name_str),
         },
         data_version=DataVersion(
             combine_version_token(
                 "comparison_results",
-                dataset_version,
                 *sorted(fps),
                 str(model_info["model_version"]),
+                str(model_info["model_name"]),
             )
         ),
         tags={
             "lineage/asset_role": "comparison_silver",
-            "dataset_version": dataset_version,
             "model_version": str(model_info["model_version"]),
+            "model_name": str(model_info["model_name"]),
             "cache_hits": str(cache_hit_count),
             "cache_misses": str(cache_miss_count),
             "perturbation_types": compact(perturbation_types),
